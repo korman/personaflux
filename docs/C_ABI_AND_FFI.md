@@ -52,6 +52,15 @@ pf_snapshot_export / import
 
 字符串使用 UTF-8 字节指针和长度。数组同样传指针与元素数量。必须验证空指针、长度溢出、对齐和有限浮点。
 
+### 数值字段
+
+- C ABI 数值字段使用明确命名的 `float`，对应 IEEE-754 binary32。
+- PAD、affinity、traits、impact 字段使用 `[-1.0f, 1.0f]`。
+- confidence、aggression 字段使用 `[0.0f, 1.0f]`。
+- 字段名和文档必须明确数值语义，不以百分制表示，也不允许隐式单位转换。
+- 外部越界、NaN 和 Infinity 返回 `PF_INVALID_ARGUMENT`，不自动钳制。
+- `-0.0f` 在 ABI 输入边界规范化为 `+0.0f`。
+
 ## 内存所有权
 
 - 谁分配，谁释放。
@@ -80,6 +89,8 @@ PF_INTERNAL_ERROR
 - 导出入口统一捕获 panic。
 - 详细文本通过独立 last-error API 获取。
 - 业务逻辑不能依赖错误字符串。
+- 内部出现 NaN、Infinity 或最终状态越界返回 `PF_INTERNAL_ERROR`，且失败调用不得产生部分状态或事件。
+- 批量 API 先完整校验；失败时整体不提交，并返回从零开始的失败项索引。无法归因到具体元素时使用 `UINT64_MAX`。
 
 ## ABI 演进
 
@@ -99,6 +110,8 @@ PF_INTERNAL_ERROR
 - 高频操作使用 C 结构体和批量数组。
 - 快照必须带版本，不直接序列化 Rust 内部布局。
 - 二进制格式必须有 schema 和迁移策略。
+- 快照中的浮点值使用明确格式的 little-endian IEEE-754 binary32；`-0.0` 规范化为 `+0.0`。
+- C ABI 只承诺行为级确定性，不承诺不同 CPU 的浮点结果逐位一致；跨平台测试使用明确数值容差。
 
 ## 安全测试
 
