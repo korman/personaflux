@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/personaflux-core",
+    "crates/personaflux-ffi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+repository = "https://github.com/korman/personaflux"
+
+[workspace.dependencies]
+personaflux-core = { path = "crates/personaflux-core", version = "0.1.0" }

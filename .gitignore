@@ -1,0 +1,54 @@
+# Rust build output
+/target/
+**/*.rs.bk
+
+# Native libraries and debug symbols
+*.a
+*.dll
+*.dylib
+*.exp
+*.lib
+*.pdb
+*.so
+*.dSYM/
+
+# Test and coverage output
+*.profdata
+*.profraw
+/coverage/
+/tarpaulin-report.html
+
+# Local tooling and logs
+/.code-review-graph/
+*.log
+.env
+.env.*
+!.env.example
+
+# IDE and editor state
+/.idea/
+/.vscode/
+/.vs/
+*.suo
+*.user
+*.swp
+*.tmp
+*~
+
+# Operating system files
+.DS_Store
+Desktop.ini
+Thumbs.db
+
+# Android local build state
+**/.gradle/
+**/.cxx/
+**/.externalNativeBuild/
+**/local.properties
+packages/android/**/build/
+
+# Apple local build state
+**/.build/
+**/DerivedData/
+**/xcuserdata/
+*.xcuserstate

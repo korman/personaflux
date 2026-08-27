@@ -1,0 +1,15 @@
+[package]
+name = "personaflux-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "C ABI for the PersonaFlux social-affect simulation core"
+
+[lib]
+name = "personaflux"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+personaflux-core.workspace = true
