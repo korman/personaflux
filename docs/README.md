@@ -14,6 +14,7 @@
 8. [PLATFORMS_AND_BINDINGS.md](PLATFORMS_AND_BINDINGS.md)：桌面、移动端和语言绑定。
 9. [NAMING.md](NAMING.md)：项目、crate、库文件和公开符号命名。
 10. [ROADMAP.md](ROADMAP.md)：里程碑、工作量和主要风险。
+11. [ADR/README.md](ADR/README.md)：架构决策记录、讨论稿和决策模板。
 
 ## 当前共识
 
