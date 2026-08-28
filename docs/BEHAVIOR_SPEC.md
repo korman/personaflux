@@ -80,7 +80,13 @@ Rust 核心当前通过 `Simulation::submit_direct_witness` 支持单个直接�
 
 命令先验证所有 ID，有目标时解析有效关系，然后完成评价和全部有界状态计算，最后一次性提交状态。观察者对行为者的动态亲和度与三层关系配置独立存储，并从 `0.0` 开始；关系值只作为本次评价的输入。PAD 只更新观察者。任何失败都不改变状态或事件队列。
 
-成功提交先产生 `DeedEvaluated`，对应状态实际变化时再依次产生 `AffinityChanged` 和 `PadChanged`。批量提交、deed ID 去重、记忆写入和逻辑时间推迟到后续阶段。
+成功提交先产生 `DeedEvaluated`，对应状态实际变化时再依次产生 `AffinityChanged` 和 `PadChanged`。记忆写入和逻辑时间推迟到后续阶段。
+
+### 批量直接目击与幂等
+
+`Simulation::submit_direct_witness_batch` 按输入数组顺序处理一组 Deed，并返回与输入一一对应的 `Applied` 或 `Duplicate` 结果；单个 `submit_direct_witness` 也使用同一结果枚举。`(observer, deed_id)` 是单提交和批量提交共享的去重键；同一观察者重复提交时返回 `Duplicate`，不重新评价、不改变状态且不产生事件，不同观察者可以使用相同 `deed_id`。
+
+批量命令先完整验证所有成员 ID 和 `actor == target` 约束，再在工作状态中顺序执行。后续输入可以看到前面已应用项的亲和度和 PAD 更新；任一项失败时，整个批次的状态、事件和去重记录全部回滚，并返回失败项的零基索引。空批量是无副作用成功操作。
 
 ## Rumor
 

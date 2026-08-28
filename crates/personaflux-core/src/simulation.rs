@@ -1,7 +1,7 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::bounds::{apply_affinity_delta, apply_bounded_delta};
-use crate::deed::{DirectWitnessDeed, DirectWitnessOutcome};
+use crate::deed::{BatchError, DirectWitnessDeed, DirectWitnessOutcome, DirectWitnessSubmission};
 use crate::evaluation::{DirectWitnessInput, EvaluationResult, evaluate_direct_witness};
 use crate::pad::Pad;
 use crate::relationship::{
@@ -92,6 +92,7 @@ pub struct Simulation {
     members: BTreeMap<MemberId, Member>,
     relationships: RelationshipStore,
     dynamic_affinities: BTreeMap<(MemberId, MemberId), Affinity>,
+    processed_deeds: BTreeSet<(MemberId, u64)>,
     events: VecDeque<SimulationEvent>,
 }
 
@@ -105,6 +106,7 @@ impl Simulation {
             members: BTreeMap::new(),
             relationships: RelationshipStore::default(),
             dynamic_affinities: BTreeMap::new(),
+            processed_deeds: BTreeSet::new(),
             events: VecDeque::new(),
         }
     }
@@ -178,7 +180,50 @@ impl Simulation {
     pub fn submit_direct_witness(
         &mut self,
         deed: DirectWitnessDeed,
-    ) -> Result<DirectWitnessOutcome, Error> {
+    ) -> Result<DirectWitnessSubmission, Error> {
+        match self.submit_direct_witness_batch(std::slice::from_ref(&deed)) {
+            Ok(mut results) => Ok(results.remove(0)),
+            Err(error) => Err(error.into_error()),
+        }
+    }
+
+    /// Applies direct-witness deeds in input order as one atomic transaction.
+    pub fn submit_direct_witness_batch(
+        &mut self,
+        deeds: &[DirectWitnessDeed],
+    ) -> Result<Vec<DirectWitnessSubmission>, BatchError> {
+        for (index, deed) in deeds.iter().enumerate() {
+            self.validate_deed(*deed)
+                .map_err(|error| BatchError::new(index, error))?;
+        }
+
+        let mut members = self.members.clone();
+        let mut dynamic_affinities = self.dynamic_affinities.clone();
+        let mut processed_deeds = self.processed_deeds.clone();
+        let mut pending_events = Vec::new();
+        let mut results = Vec::with_capacity(deeds.len());
+
+        for (index, deed) in deeds.iter().copied().enumerate() {
+            let result = self
+                .apply_deed_to_state(
+                    deed,
+                    &mut members,
+                    &mut dynamic_affinities,
+                    &mut processed_deeds,
+                    &mut pending_events,
+                )
+                .map_err(|error| BatchError::new(index, error))?;
+            results.push(result);
+        }
+
+        self.members = members;
+        self.dynamic_affinities = dynamic_affinities;
+        self.processed_deeds = processed_deeds;
+        self.events.extend(pending_events);
+        Ok(results)
+    }
+
+    fn validate_deed(&self, deed: DirectWitnessDeed) -> Result<(), Error> {
         self.require_member(deed.observer)?;
         self.require_member(deed.actor)?;
         if let Some(target) = deed.target {
@@ -186,6 +231,24 @@ impl Simulation {
             if deed.actor == target {
                 return Err(Error::ActorTargetSame(target));
             }
+        }
+        Ok(())
+    }
+
+    fn apply_deed_to_state(
+        &self,
+        deed: DirectWitnessDeed,
+        members: &mut BTreeMap<MemberId, Member>,
+        dynamic_affinities: &mut BTreeMap<(MemberId, MemberId), Affinity>,
+        processed_deeds: &mut BTreeSet<(MemberId, u64)>,
+        pending_events: &mut Vec<SimulationEvent>,
+    ) -> Result<DirectWitnessSubmission, Error> {
+        let key = (deed.observer, deed.deed_id);
+        if processed_deeds.contains(&key) {
+            return Ok(DirectWitnessSubmission::Duplicate {
+                observer: deed.observer,
+                deed_id: deed.deed_id,
+            });
         }
 
         let relationship = match deed.target {
@@ -203,16 +266,13 @@ impl Simulation {
             deed.threatens_observer,
         ));
 
-        let previous_affinity = self
-            .dynamic_affinities
+        let previous_affinity = dynamic_affinities
             .get(&(deed.observer, deed.actor))
             .copied()
             .unwrap_or_else(|| Affinity::new(0.0).expect("neutral affinity is valid"));
         let current_affinity =
             apply_affinity_delta(previous_affinity, evaluation.raw_affinity_delta())?;
-
-        let previous_pad = self
-            .members
+        let previous_pad = members
             .get(&deed.observer)
             .expect("observer was validated")
             .pad;
@@ -232,19 +292,18 @@ impl Simulation {
             previous_pad,
             current_pad,
         );
-
+        processed_deeds.insert(key);
         if current_affinity != previous_affinity {
-            self.dynamic_affinities
-                .insert((deed.observer, deed.actor), current_affinity);
+            dynamic_affinities.insert((deed.observer, deed.actor), current_affinity);
         }
         if current_pad != previous_pad {
-            self.members
+            members
                 .get_mut(&deed.observer)
                 .expect("observer was validated")
                 .pad = current_pad;
         }
 
-        self.events.push_back(SimulationEvent::DeedEvaluated {
+        pending_events.push(SimulationEvent::DeedEvaluated {
             deed_id: deed.deed_id,
             observer: deed.observer,
             actor: deed.actor,
@@ -252,7 +311,7 @@ impl Simulation {
             evaluation,
         });
         if current_affinity != previous_affinity {
-            self.events.push_back(SimulationEvent::AffinityChanged {
+            pending_events.push(SimulationEvent::AffinityChanged {
                 observer: deed.observer,
                 actor: deed.actor,
                 previous: previous_affinity,
@@ -260,14 +319,13 @@ impl Simulation {
             });
         }
         if current_pad != previous_pad {
-            self.events.push_back(SimulationEvent::PadChanged {
+            pending_events.push(SimulationEvent::PadChanged {
                 member_id: deed.observer,
                 previous: previous_pad,
                 current: current_pad,
             });
         }
-
-        Ok(outcome)
+        Ok(DirectWitnessSubmission::Applied(outcome))
     }
 
     pub fn set_member_relationship(
@@ -485,7 +543,10 @@ impl Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Affinity, Aggression, DirectWitnessDeed, Impact, RelationshipLookup};
+    use crate::{
+        Affinity, Aggression, DirectWitnessDeed, DirectWitnessSubmission, Impact,
+        RelationshipLookup,
+    };
 
     fn affinity(value: f32) -> Affinity {
         Affinity::new(value).unwrap()
@@ -527,6 +588,13 @@ mod tests {
             aggression(aggression_value),
             threatens_observer,
         )
+    }
+
+    fn applied(submission: DirectWitnessSubmission) -> DirectWitnessOutcome {
+        match submission {
+            DirectWitnessSubmission::Applied(outcome) => outcome,
+            DirectWitnessSubmission::Duplicate { .. } => panic!("expected applied submission"),
+        }
     }
 
     #[test]
@@ -887,9 +955,11 @@ mod tests {
             .unwrap();
         simulation.drain_events().for_each(drop);
 
-        let outcome = simulation
-            .submit_direct_witness(deed(7, observer, actor, Some(target), 0.8, 0.2, false))
-            .unwrap();
+        let outcome = applied(
+            simulation
+                .submit_direct_witness(deed(7, observer, actor, Some(target), 0.8, 0.2, false))
+                .unwrap(),
+        );
 
         assert_eq!(outcome.deed_id(), 7);
         assert_eq!(outcome.observer(), observer);
@@ -932,9 +1002,11 @@ mod tests {
             .unwrap();
         simulation.drain_events().for_each(drop);
 
-        let outcome = simulation
-            .submit_direct_witness(deed(1, observer, actor, Some(target), 0.5, 0.0, false))
-            .unwrap();
+        let outcome = applied(
+            simulation
+                .submit_direct_witness(deed(1, observer, actor, Some(target), 0.5, 0.0, false))
+                .unwrap(),
+        );
 
         assert_eq!(
             outcome.relationship().source(),
@@ -951,9 +1023,11 @@ mod tests {
     #[test]
     fn direct_witness_zero_impact_changes_pad_but_not_affinity() {
         let (mut simulation, _, _, observer, actor) = relationship_simulation();
-        let outcome = simulation
-            .submit_direct_witness(deed(2, observer, actor, None, 0.0, 0.6, true))
-            .unwrap();
+        let outcome = applied(
+            simulation
+                .submit_direct_witness(deed(2, observer, actor, None, 0.0, 0.6, true))
+                .unwrap(),
+        );
 
         assert_eq!(outcome.current_affinity(), affinity(0.0));
         assert_eq!(outcome.current_pad().pleasure, 0.0);
@@ -971,9 +1045,11 @@ mod tests {
     #[test]
     fn direct_witness_with_no_effect_emits_only_evaluation_event() {
         let (mut simulation, _, _, observer, actor) = relationship_simulation();
-        let outcome = simulation
-            .submit_direct_witness(deed(22, observer, actor, None, 0.0, 0.0, true))
-            .unwrap();
+        let outcome = applied(
+            simulation
+                .submit_direct_witness(deed(22, observer, actor, None, 0.0, 0.0, true))
+                .unwrap(),
+        );
 
         assert_eq!(outcome.previous_affinity(), outcome.current_affinity());
         assert_eq!(outcome.previous_pad(), outcome.current_pad());
@@ -1017,9 +1093,11 @@ mod tests {
     #[test]
     fn direct_witness_allows_observer_to_be_actor() {
         let (mut simulation, _, _, observer, _) = relationship_simulation();
-        let outcome = simulation
-            .submit_direct_witness(deed(4, observer, observer, None, 0.2, 0.0, false))
-            .unwrap();
+        let outcome = applied(
+            simulation
+                .submit_direct_witness(deed(4, observer, observer, None, 0.2, 0.0, false))
+                .unwrap(),
+        );
         assert_eq!(outcome.observer(), observer);
         assert_eq!(outcome.actor(), observer);
         assert!(
@@ -1068,17 +1146,21 @@ mod tests {
         let target = simulation.add_member(faction_b).unwrap();
         simulation.drain_events().for_each(drop);
 
-        let missing = simulation
-            .submit_direct_witness(deed(10, observer, actor, Some(target), 0.1, 0.0, false))
-            .unwrap();
+        let missing = applied(
+            simulation
+                .submit_direct_witness(deed(10, observer, actor, Some(target), 0.1, 0.0, false))
+                .unwrap(),
+        );
         assert_eq!(missing.relationship(), RelationshipLookup::Missing);
 
         simulation
             .set_faction_relationship(faction_a, faction_b, affinity(0.2))
             .unwrap();
-        let faction = simulation
-            .submit_direct_witness(deed(11, observer, actor, Some(target), 0.1, 0.0, false))
-            .unwrap();
+        let faction = applied(
+            simulation
+                .submit_direct_witness(deed(11, observer, actor, Some(target), 0.1, 0.0, false))
+                .unwrap(),
+        );
         assert_eq!(
             faction.relationship().source(),
             Some(RelationshipLayer::FactionToFaction)
@@ -1087,9 +1169,11 @@ mod tests {
         simulation
             .set_faction_member_relationship(faction_a, target, affinity(0.4))
             .unwrap();
-        let faction_member = simulation
-            .submit_direct_witness(deed(12, observer, actor, Some(target), 0.1, 0.0, false))
-            .unwrap();
+        let faction_member = applied(
+            simulation
+                .submit_direct_witness(deed(12, observer, actor, Some(target), 0.1, 0.0, false))
+                .unwrap(),
+        );
         assert_eq!(
             faction_member.relationship().source(),
             Some(RelationshipLayer::FactionToMember)
@@ -1098,9 +1182,11 @@ mod tests {
         simulation
             .set_member_relationship(observer, target, affinity(0.6))
             .unwrap();
-        let member = simulation
-            .submit_direct_witness(deed(13, observer, actor, Some(target), 0.1, 0.0, false))
-            .unwrap();
+        let member = applied(
+            simulation
+                .submit_direct_witness(deed(13, observer, actor, Some(target), 0.1, 0.0, false))
+                .unwrap(),
+        );
         assert_eq!(
             member.relationship().source(),
             Some(RelationshipLayer::MemberToMember)
@@ -1113,22 +1199,26 @@ mod tests {
         let third_party = simulation.add_member(faction_a).unwrap();
         simulation.drain_events().for_each(drop);
 
-        let threatened = simulation
-            .submit_direct_witness(deed(20, observer, actor, Some(observer), 0.0, 0.5, true))
-            .unwrap();
+        let threatened = applied(
+            simulation
+                .submit_direct_witness(deed(20, observer, actor, Some(observer), 0.0, 0.5, true))
+                .unwrap(),
+        );
         assert!((threatened.current_pad().dominance + 0.2).abs() < 1e-6);
 
-        let third_party_attack = simulation
-            .submit_direct_witness(deed(
-                21,
-                observer,
-                actor,
-                Some(third_party),
-                0.0,
-                0.5,
-                false,
-            ))
-            .unwrap();
+        let third_party_attack = applied(
+            simulation
+                .submit_direct_witness(deed(
+                    21,
+                    observer,
+                    actor,
+                    Some(third_party),
+                    0.0,
+                    0.5,
+                    false,
+                ))
+                .unwrap(),
+        );
         assert_eq!(
             third_party_attack.current_pad().dominance,
             threatened.current_pad().dominance
@@ -1186,18 +1276,185 @@ mod tests {
         let first_once = first.submit_direct_witness(first_deed).unwrap();
         let first_twice = first.submit_direct_witness(first_deed).unwrap();
         let second_once = second.submit_direct_witness(second_deed).unwrap();
-        let second_twice = second.submit_direct_witness(second_deed).unwrap();
+        assert_eq!(first_once, second_once);
+        assert_eq!(
+            first_twice,
+            DirectWitnessSubmission::Duplicate {
+                observer,
+                deed_id: 50,
+            }
+        );
+        assert_eq!(
+            first.member_affinity(observer, actor).unwrap(),
+            second
+                .member_affinity(second_observer, second_actor)
+                .unwrap()
+        );
+        assert_eq!(
+            first.member_pad(observer),
+            second.member_pad(second_observer)
+        );
+    }
 
-        assert_eq!(first_once.evaluation(), second_once.evaluation());
+    #[test]
+    fn empty_batch_is_a_no_op() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        let before_pad = simulation.member_pad(observer).unwrap();
         assert_eq!(
-            first_once.current_affinity(),
-            second_once.current_affinity()
+            simulation.submit_direct_witness_batch(&[]).unwrap(),
+            Vec::new()
         );
         assert_eq!(
-            first_twice.current_affinity(),
-            second_twice.current_affinity()
+            simulation.member_affinity(observer, actor).unwrap(),
+            affinity(0.0)
         );
-        assert_eq!(first_twice.current_pad(), second_twice.current_pad());
-        assert!(first_twice.current_affinity().value() > first_once.current_affinity().value());
+        assert_eq!(simulation.member_pad(observer), Some(before_pad));
+        assert!(simulation.drain_events().next().is_none());
+    }
+
+    #[test]
+    fn batch_results_are_input_aligned_and_duplicate_items_are_explicit() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        let deeds = [
+            deed(60, observer, actor, None, 0.2, 0.0, false),
+            deed(60, observer, actor, None, -1.0, 1.0, true),
+            deed(61, observer, actor, None, 0.0, 0.0, false),
+        ];
+        let results = simulation.submit_direct_witness_batch(&deeds).unwrap();
+        assert!(matches!(results[0], DirectWitnessSubmission::Applied(_)));
+        assert_eq!(
+            results[1],
+            DirectWitnessSubmission::Duplicate {
+                observer,
+                deed_id: 60,
+            }
+        );
+        assert!(matches!(results[2], DirectWitnessSubmission::Applied(_)));
+        let events = simulation.drain_events().collect::<Vec<_>>();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(
+            events[0],
+            SimulationEvent::DeedEvaluated { deed_id: 60, .. }
+        ));
+        assert!(matches!(events[1], SimulationEvent::AffinityChanged { .. }));
+        assert!(matches!(events[2], SimulationEvent::PadChanged { .. }));
+        assert!(matches!(
+            events[3],
+            SimulationEvent::DeedEvaluated { deed_id: 61, .. }
+        ));
+    }
+
+    #[test]
+    fn batch_deduplication_is_per_observer_and_shared_with_single_submission() {
+        let (mut simulation, faction_a, _, observer_a, actor) = relationship_simulation();
+        let observer_b = simulation.add_member(faction_a).unwrap();
+        simulation.drain_events().for_each(drop);
+
+        let first = simulation
+            .submit_direct_witness(deed(70, observer_a, actor, None, 0.4, 0.0, false))
+            .unwrap();
+        assert!(matches!(first, DirectWitnessSubmission::Applied(_)));
+        let results = simulation
+            .submit_direct_witness_batch(&[
+                deed(70, observer_a, actor, None, 0.9, 0.0, false),
+                deed(70, observer_b, actor, None, 0.4, 0.0, false),
+            ])
+            .unwrap();
+        assert_eq!(
+            results[0],
+            DirectWitnessSubmission::Duplicate {
+                observer: observer_a,
+                deed_id: 70,
+            }
+        );
+        assert!(matches!(results[1], DirectWitnessSubmission::Applied(_)));
+        assert!(
+            (simulation
+                .member_affinity(observer_a, actor)
+                .unwrap()
+                .value()
+                - 0.12)
+                .abs()
+                < 1e-6
+        );
+        assert!(
+            simulation
+                .member_affinity(observer_b, actor)
+                .unwrap()
+                .value()
+                > 0.0
+        );
+    }
+
+    #[test]
+    fn batch_failure_rolls_back_prior_items_state_events_and_deduplication() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        simulation
+            .set_member_relationship(observer, actor, affinity(0.5))
+            .unwrap();
+        simulation.drain_events().for_each(drop);
+        let invalid = MemberId(999);
+        let error = simulation
+            .submit_direct_witness_batch(&[
+                deed(80, observer, actor, None, 0.5, 0.0, false),
+                deed(81, observer, actor, Some(invalid), 0.5, 0.0, false),
+            ])
+            .unwrap_err();
+        assert_eq!(error.index(), 1);
+        assert_eq!(error.error(), &Error::MemberNotFound(invalid));
+        assert_eq!(
+            simulation.member_affinity(observer, actor).unwrap(),
+            affinity(0.0)
+        );
+        assert_eq!(simulation.member_pad(observer), Some(Pad::default()));
+        assert!(simulation.drain_events().next().is_none());
+
+        let retry = simulation
+            .submit_direct_witness(deed(80, observer, actor, None, 0.5, 0.0, false))
+            .unwrap();
+        assert!(matches!(retry, DirectWitnessSubmission::Applied(_)));
+    }
+
+    #[test]
+    fn batch_prevalidation_reports_first_invalid_index_without_side_effects() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        let unknown = MemberId(404);
+        let error = simulation
+            .submit_direct_witness_batch(&[
+                deed(90, observer, actor, None, 0.1, 0.0, false),
+                deed(91, observer, unknown, None, 0.1, 0.0, false),
+                deed(92, observer, actor, Some(actor), 0.1, 0.0, false),
+            ])
+            .unwrap_err();
+        assert_eq!(error.index(), 1);
+        assert_eq!(error.error(), &Error::MemberNotFound(unknown));
+        assert_eq!(
+            simulation.member_affinity(observer, actor).unwrap(),
+            affinity(0.0)
+        );
+        assert!(simulation.drain_events().next().is_none());
+    }
+
+    #[test]
+    fn batch_failure_after_duplicate_does_not_commit_duplicate_or_prior_application() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        simulation
+            .submit_direct_witness(deed(100, observer, actor, None, 0.2, 0.0, false))
+            .unwrap();
+        simulation.drain_events().for_each(drop);
+        let unknown = MemberId(505);
+        let error = simulation
+            .submit_direct_witness_batch(&[
+                deed(100, observer, actor, None, 0.9, 0.0, false),
+                deed(101, observer, actor, Some(unknown), 0.2, 0.0, false),
+            ])
+            .unwrap_err();
+        assert_eq!(error.index(), 1);
+        assert!((simulation.member_affinity(observer, actor).unwrap().value() - 0.06).abs() < 1e-6);
+        assert!(simulation.drain_events().next().is_none());
+        let fresh = simulation
+            .submit_direct_witness(deed(101, observer, actor, None, 0.2, 0.0, false))
+            .unwrap();
+        assert!(matches!(fresh, DirectWitnessSubmission::Applied(_)));
     }
 }

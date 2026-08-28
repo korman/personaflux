@@ -9,7 +9,7 @@ mod simulation;
 mod values;
 
 pub use bounds::{apply_affinity_delta, apply_bounded_delta, apply_pad_value_delta};
-pub use deed::{DirectWitnessDeed, DirectWitnessOutcome};
+pub use deed::{BatchError, DirectWitnessDeed, DirectWitnessOutcome, DirectWitnessSubmission};
 pub use evaluation::{
     DirectWitnessInput, EvaluationPolicyV1, EvaluationResult, MemoryClassification, MemoryDecision,
     evaluate_direct_witness,

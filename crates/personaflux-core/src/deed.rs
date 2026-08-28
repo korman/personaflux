@@ -1,6 +1,7 @@
 use crate::evaluation::EvaluationResult;
 use crate::pad::Pad;
 use crate::relationship::RelationshipLookup;
+use crate::simulation::Error;
 use crate::simulation::MemberId;
 use crate::values::{Affinity, Aggression, Impact};
 
@@ -51,6 +52,58 @@ pub struct DirectWitnessOutcome {
     current_affinity: Affinity,
     previous_pad: Pad,
     current_pad: Pad,
+}
+
+/// Result of one submission, distinguishing an applied deed from an idempotent duplicate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DirectWitnessSubmission {
+    Applied(DirectWitnessOutcome),
+    Duplicate { observer: MemberId, deed_id: u64 },
+}
+
+impl DirectWitnessSubmission {
+    pub const fn is_duplicate(self) -> bool {
+        matches!(self, Self::Duplicate { .. })
+    }
+
+    pub const fn as_applied(self) -> Option<DirectWitnessOutcome> {
+        match self {
+            Self::Applied(outcome) => Some(outcome),
+            Self::Duplicate { .. } => None,
+        }
+    }
+
+    pub const fn duplicate_key(self) -> Option<(MemberId, u64)> {
+        match self {
+            Self::Applied(_) => None,
+            Self::Duplicate { observer, deed_id } => Some((observer, deed_id)),
+        }
+    }
+}
+
+/// Error identifying which item caused a batch submission to fail.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchError {
+    index: usize,
+    error: Error,
+}
+
+impl BatchError {
+    pub(crate) const fn new(index: usize, error: Error) -> Self {
+        Self { index, error }
+    }
+
+    pub const fn index(&self) -> usize {
+        self.index
+    }
+
+    pub const fn error(&self) -> &Error {
+        &self.error
+    }
+
+    pub fn into_error(self) -> Error {
+        self.error
+    }
 }
 
 impl DirectWitnessOutcome {
