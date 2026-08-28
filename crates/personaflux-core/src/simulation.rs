@@ -15,14 +15,31 @@ use crate::values::{Affinity, ValueError};
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct FactionId(u64);
 
+impl FactionId {
+    /// Constructs an identifier from its stable wire representation.
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the stable wire representation of this identifier.
+    pub const fn into_raw(self) -> u64 {
+        self.0
+    }
+}
+
 /// Stable identifier for a member inside one simulation.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct MemberId(u64);
 
 impl MemberId {
-    #[cfg(test)]
-    pub(crate) const fn from_raw(value: u64) -> Self {
+    /// Constructs an identifier from its stable wire representation.
+    pub const fn from_raw(value: u64) -> Self {
         Self(value)
+    }
+
+    /// Returns the stable wire representation of this identifier.
+    pub const fn into_raw(self) -> u64 {
+        self.0
     }
 }
 
@@ -720,6 +737,16 @@ impl Simulation {
 
     pub fn drain_events(&mut self) -> impl Iterator<Item = SimulationEvent> + '_ {
         self.events.drain(..)
+    }
+
+    /// Returns the number of queued events without consuming them.
+    pub fn event_count(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Returns a deterministic, non-consuming snapshot of queued events.
+    pub fn events_snapshot(&self) -> Vec<SimulationEvent> {
+        self.events.iter().cloned().collect()
     }
 }
 

@@ -9,7 +9,8 @@ description = "C ABI for the PersonaFlux social-affect simulation core"
 
 [lib]
 name = "personaflux"
-crate-type = ["staticlib", "cdylib"]
+crate-type = ["rlib", "staticlib", "cdylib"]
+# The Rust library artifact is used only by the in-workspace ABI integration tests.
 
 [dependencies]
 personaflux-core.workspace = true

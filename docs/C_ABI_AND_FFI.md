@@ -116,3 +116,55 @@ PF_INTERNAL_ERROR
 ## 安全测试
 
 覆盖空句柄、重复销毁策略、非法 ID、空指针、极端长度、UTF-8 错误、NaN、Infinity、缓冲区不足、panic containment、C 头文件编译和模糊测试。
+
+## ABI v0 实现契约
+
+The live Rust core is exposed through the hand-maintained header
+`crates/personaflux-ffi/include/personaflux.h`. ABI v0 uses
+`PF_ABI_VERSION == 0` and the fixed evaluation model reports
+`PF_MODEL_VERSION == 1`. Snapshots, rumors, personality data, and language
+wrappers are intentionally outside this version.
+
+The public C surface covers simulation lifetime, faction/member creation and
+queries, all three relationship layers, direct-witness submission (including
+the atomic batch form), logical time, memory queries, and event count/read/clear.
+The Rust core remains the only implementation of these behaviors; the FFI
+layer only validates and translates wire values.
+
+The layout fixture is `crates/personaflux-ffi/tests/header_smoke.c`. Supported
+build environments should compile it with a C11 compiler and the include path
+`crates/personaflux-ffi/include`.
+
+### Wire rules
+
+- IDs are `uint64_t`; result codes are fixed-width `int32_t` values.
+- Public extensible structs begin with `uint32_t struct_size` and
+  `uint32_t api_version`. New fields are append-only.
+- Rust `Option`, enums, and booleans are represented by explicit presence or
+  tag fields. Boolean inputs accept only `0` and `1`.
+- Floating-point fields are C `float` values using the documented normalized
+  ranges. Invalid finite/range values return `PF_INVALID_ARGUMENT`.
+- A deed with `has_target == 0` must set `target` to zero. No special member ID
+  represents a missing target.
+
+### Ownership and errors
+
+All byte arrays, memory records, submissions, and events use caller-owned
+buffers. Count/read operations never retain caller pointers. A read with an
+insufficient capacity returns `PF_BUFFER_TOO_SMALL` and does not mutate the
+simulation or event queue. Event reads are non-destructive; `pf_events_clear`
+is the only event queue clearing operation.
+
+Every exported function contains panics and returns `PF_INTERNAL_ERROR` if a
+panic occurs. Diagnostic text is thread-local and copied through
+`pf_last_error_message_copy`; callers must use the numeric result code for
+control flow. A simulation handle must be accessed serially by its host. A
+null destroy is a no-op; other null handles or required null pointers are
+invalid arguments.
+
+### Stable tags
+
+Submission, relationship source, memory kind, memory decision, and event tags
+are fixed numeric constants in the header. Explicit neutral relationships use
+`present == 1` and `affinity == 0.0`; missing relationships use
+`present == 0`.
