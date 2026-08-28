@@ -168,3 +168,27 @@ Submission, relationship source, memory kind, memory decision, and event tags
 are fixed numeric constants in the header. Explicit neutral relationships use
 `present == 1` and `affinity == 0.0`; missing relationships use
 `present == 0`.
+
+## Binding verification
+
+The v0 wrappers live under `bindings/csharp`, `bindings/swift`, and
+`bindings/kotlin`. They are intentionally translation-only layers: all
+evaluation, relationship resolution, state mutation, memory retention, time,
+deduplication, and event ordering remain in `personaflux-core` and
+`personaflux-ffi`.
+
+Each wrapper owns an opaque handle and copies caller-provided strings, arrays,
+records, and events. C# uses `SafeHandle` and Cdecl P/Invoke; Swift uses
+`OpaquePointer` and `deinit`; Kotlin uses `AutoCloseable` and a small JNI
+bridge over direct buffers. Public wrapper APIs expose value types and map
+numeric result codes to language-native errors while preserving batch error
+indices and unknown future tags.
+
+The CI workflow validates C11 layout, Rust exports, .NET loading, Swift
+device/simulator packaging, and Android AAR assembly. Native artifacts are
+build outputs and are not checked into the repository.
+
+ABI v0 is not silently promoted to v1 by binding changes. After all supported
+language and platform tests pass, a separate maintainer-approved release may
+publish a versioned ABI v1 header and artifacts. Existing v0 headers, symbols,
+and compatibility tests remain available for long-term consumers.

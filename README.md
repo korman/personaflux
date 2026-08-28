@@ -33,6 +33,13 @@ cargo build -p personaflux-ffi --release
 
 The FFI crate produces `personaflux.lib` and `personaflux.dll` on Windows, with corresponding `.a`, `.so`, or `.dylib` artifacts on other targets.
 
+## Language bindings
+
+ABI v0 wrappers are provided under `bindings/csharp`, `bindings/swift`, and
+`bindings/kotlin`. See `docs/PLATFORMS_AND_BINDINGS.md` for platform build
+requirements. Build the C# wrapper with `dotnet build bindings/csharp/PersonaFlux.csproj`; Swift and Android packaging require the
+respective Apple or Android toolchains.
+
 ## Status
 
 The public behavior and C ABI are not stable yet. Resolve the open decisions in `docs/BEHAVIOR_SPEC.md` before implementing the full simulation model or freezing ABI v1.
