@@ -114,9 +114,38 @@ PadChanged (if changed)
 MemoryRemembered or MemoryUpgraded (if changed)
 ```
 
-This version does not assign logical creation or expiration ticks. The `60` and
-`3600` logical-second TTLs, expiry cleanup, and permanent deduplication retention
-are implemented with the logical-time state in the next development step.
+Memory records assign `created_tick` at the current simulation tick and set
+`expires_at` to `created_tick + 60` for short-term or `created_tick + 3600` for
+long-term records. Expiration uses `now >= expires_at`; expired records are removed
+from active memory while the permanent `(observer, deed_id)` deduplication key is
+retained. A short-term upgrade keeps the original creation tick and starts a new
+3600-tick long-term lifetime at the upgrade tick.
+
+## Logical Time and Recovery
+
+The Rust core uses a monotonic `u64` logical tick, initialized to `0`. v1 fixes one
+tick to one logical second. `Simulation::step(delta_ticks)` performs checked
+addition and delegates to `advance_to(target_tick)`. Zero advancement is a strict
+no-op; backwards targets and arithmetic overflow fail without changing state or
+events.
+
+Advancing time uses the total tick delta once. PAD axes recover linearly toward zero
+at `0.05` pleasure, `0.20` arousal, and `0.03` dominance per tick. Recovery never
+crosses zero or exceeds the current absolute value. All members are processed in
+`MemberId` order, followed by active memory expiration in `(observer, deed_id)`
+order.
+
+For a non-empty successful advancement, events are appended in this order:
+
+```text
+PadChanged (if changed)
+MemoryExpired (if any)
+TimeAdvanced
+```
+
+The time operation uses a working copy of PAD and memory state. Invalid PAD values,
+expiration overflow, backwards movement, and checked arithmetic failures leave the
+clock, state, deduplication ledger, and existing event queue unchanged.
 
 ## Rumor
 
@@ -160,7 +189,7 @@ explanation factors
 
 - v1 根据 `max(abs(impact), aggression)` 将直接目击行为分类为短期或长期记忆；低于 `0.40` 不记录，`0.40` 和 `0.75` 分别是包含边界。
 - 同一 `(observer, deed_id)` 只保留一条记录，短期可以升级为长期，不降级；原始行为字段保持首次记录内容。
-- v1 已提供确定性查询和事务回滚，但逻辑时间、TTL、过期清理和容量淘汰留到逻辑时间阶段。
+- v1 已提供确定性查询和事务回滚；逻辑时间使用单调 `u64` tick，TTL 和过期清理遵循本节的逻辑时间约定，容量淘汰仍留到后续阶段。
 - 相同 deed ID 去重，同类行为更新重复计数。
 - 分享通常来自长期记忆。
 - MVP 建议先清理过期项，再淘汰最低重要性；相同时按最早时间和稳定 ID。

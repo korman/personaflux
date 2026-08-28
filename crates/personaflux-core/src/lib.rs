@@ -7,6 +7,7 @@ mod memory;
 mod pad;
 mod relationship;
 mod simulation;
+mod time;
 mod values;
 
 pub use bounds::{apply_affinity_delta, apply_bounded_delta, apply_pad_value_delta};

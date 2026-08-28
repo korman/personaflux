@@ -8,6 +8,7 @@ use crate::pad::Pad;
 use crate::relationship::{
     RelationshipLayer, RelationshipLookup, RelationshipStore, RelationshipSubject,
 };
+use crate::time::{LogicalClock, TimeError};
 use crate::values::{Affinity, ValueError};
 
 /// Stable identifier for a faction inside one simulation.
@@ -37,6 +38,8 @@ pub enum Error {
     FactionNotFound(FactionId),
     MemberNotFound(MemberId),
     ActorTargetSame(MemberId),
+    TimeWentBackwards { current_tick: u64, target_tick: u64 },
+    TimeOverflow,
     Value(ValueError),
 }
 
@@ -91,6 +94,15 @@ pub enum SimulationEvent {
         current: MemoryKind,
         salience: f32,
     },
+    MemoryExpired {
+        observer: MemberId,
+        deed_id: u64,
+        kind: MemoryKind,
+    },
+    TimeAdvanced {
+        previous_tick: u64,
+        current_tick: u64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -115,6 +127,7 @@ pub struct Simulation {
     dynamic_affinities: BTreeMap<(MemberId, MemberId), Affinity>,
     processed_deeds: BTreeSet<(MemberId, u64)>,
     memories: MemoryStore,
+    clock: LogicalClock,
     events: VecDeque<SimulationEvent>,
 }
 
@@ -130,12 +143,112 @@ impl Simulation {
             dynamic_affinities: BTreeMap::new(),
             processed_deeds: BTreeSet::new(),
             memories: MemoryStore::default(),
+            clock: LogicalClock::new(),
             events: VecDeque::new(),
         }
     }
 
     pub fn config(&self) -> SimulationConfig {
         self.config
+    }
+
+    /// Returns the current monotonic logical tick.
+    pub const fn current_tick(&self) -> u64 {
+        self.clock.current_tick()
+    }
+
+    /// Advances the logical clock by a checked number of ticks.
+    pub fn step(&mut self, delta_ticks: u64) -> Result<(), Error> {
+        let target_tick = self
+            .current_tick()
+            .checked_add(delta_ticks)
+            .ok_or(Error::TimeOverflow)?;
+        self.advance_to(target_tick)
+    }
+
+    /// Advances the simulation to an absolute logical tick atomically.
+    pub fn advance_to(&mut self, target_tick: u64) -> Result<(), Error> {
+        let previous_tick = self.current_tick();
+        if target_tick < previous_tick {
+            return Err(Error::TimeWentBackwards {
+                current_tick: previous_tick,
+                target_tick,
+            });
+        }
+        if target_tick == previous_tick {
+            return Ok(());
+        }
+
+        let delta_ticks = target_tick - previous_tick;
+        let mut members = self.members.clone();
+        let mut memories = self.memories.clone();
+        let mut pending_events = Vec::new();
+
+        for (member_id, member) in &mut members {
+            let previous = member.pad;
+            let current = Self::recover_pad(previous, delta_ticks)?;
+            if current != previous {
+                member.pad = current;
+                pending_events.push(SimulationEvent::PadChanged {
+                    member_id: *member_id,
+                    previous,
+                    current,
+                });
+            }
+        }
+
+        for record in memories.expire(target_tick) {
+            pending_events.push(SimulationEvent::MemoryExpired {
+                observer: record.observer(),
+                deed_id: record.deed_id(),
+                kind: record.kind(),
+            });
+        }
+        pending_events.push(SimulationEvent::TimeAdvanced {
+            previous_tick,
+            current_tick: target_tick,
+        });
+
+        self.clock
+            .advance_to(target_tick)
+            .map_err(Self::map_time_error)?;
+        self.members = members;
+        self.memories = memories;
+        self.events.extend(pending_events);
+        Ok(())
+    }
+
+    fn map_time_error(error: TimeError) -> Error {
+        match error {
+            TimeError::WentBackwards {
+                current_tick,
+                target_tick,
+            } => Error::TimeWentBackwards {
+                current_tick,
+                target_tick,
+            },
+        }
+    }
+
+    fn recover_pad(pad: Pad, delta_ticks: u64) -> Result<Pad, Error> {
+        Ok(Pad::new(
+            Self::recover_axis(pad.pleasure, 0.05, delta_ticks)?,
+            Self::recover_axis(pad.arousal, 0.20, delta_ticks)?,
+            Self::recover_axis(pad.dominance, 0.03, delta_ticks)?,
+        )?)
+    }
+
+    fn recover_axis(value: f32, rate: f32, delta_ticks: u64) -> Result<f32, Error> {
+        crate::PadValue::new(value)?;
+        if value == 0.0 || delta_ticks == 0 {
+            return Ok(if value == 0.0 { 0.0 } else { value });
+        }
+        let recovery = (rate * delta_ticks as f32).min(value.abs());
+        Ok(if value.is_sign_negative() {
+            value + recovery
+        } else {
+            value - recovery
+        })
     }
 
     pub fn add_faction(&mut self, name: impl Into<String>) -> Result<FactionId, Error> {
@@ -322,9 +435,11 @@ impl Simulation {
             apply_bounded_delta(previous_pad.dominance, raw_pad.dominance)?,
         )?;
 
-        let memory_change = MemoryRecord::from_evaluation(deed, evaluation)
-            .map(|record| memories.insert_or_upgrade(record))
-            .unwrap_or(MemoryChange::None);
+        let memory_change =
+            match MemoryRecord::from_evaluation(deed, evaluation, self.current_tick())? {
+                Some(record) => memories.insert_or_upgrade(record, self.current_tick())?,
+                None => MemoryChange::None,
+            };
         let (memory, memory_event) = match memory_change {
             MemoryChange::None => (None, None),
             MemoryChange::Remembered(record) => (
@@ -1663,5 +1778,195 @@ mod tests {
             .unwrap();
         assert!(matches!(retry, DirectWitnessSubmission::Applied(_)));
         assert!(simulation.memory(observer, 207).unwrap().is_some());
+    }
+
+    #[test]
+    fn logical_time_starts_at_zero_and_zero_advancement_is_a_no_op() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        assert_eq!(simulation.current_tick(), 0);
+        simulation.advance_to(0).unwrap();
+        simulation.step(0).unwrap();
+        assert_eq!(simulation.current_tick(), 0);
+        assert_eq!(simulation.member_pad(observer), Some(Pad::default()));
+        assert_eq!(
+            simulation.member_affinity(observer, actor).unwrap(),
+            affinity(0.0)
+        );
+        assert!(simulation.drain_events().next().is_none());
+    }
+
+    #[test]
+    fn logical_time_rejects_backwards_and_overflow_without_side_effects() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        simulation.advance_to(5).unwrap();
+        simulation.drain_events().for_each(drop);
+        let previous_pad = simulation.member_pad(observer).unwrap();
+        assert_eq!(
+            simulation.advance_to(4),
+            Err(Error::TimeWentBackwards {
+                current_tick: 5,
+                target_tick: 4,
+            })
+        );
+        assert_eq!(simulation.current_tick(), 5);
+        assert_eq!(simulation.member_pad(observer), Some(previous_pad));
+        assert!(simulation.drain_events().next().is_none());
+
+        simulation.advance_to(u64::MAX).unwrap();
+        simulation.drain_events().for_each(drop);
+        assert_eq!(simulation.current_tick(), u64::MAX);
+        assert_eq!(simulation.step(1), Err(Error::TimeOverflow));
+        assert_eq!(simulation.current_tick(), u64::MAX);
+        assert_eq!(
+            simulation.member_affinity(observer, actor).unwrap(),
+            affinity(0.0)
+        );
+        assert!(simulation.drain_events().next().is_none());
+    }
+
+    #[test]
+    fn pad_recovers_toward_zero_at_fixed_rates_without_crossing_zero() {
+        let (mut simulation, _, _, observer, _) = relationship_simulation();
+        let initial = Pad::new(0.8, -0.7, 0.9).unwrap();
+        simulation.members.get_mut(&observer).unwrap().pad = initial;
+        simulation.advance_to(1).unwrap();
+        let after_one = simulation.member_pad(observer).unwrap();
+        assert!((after_one.pleasure - 0.75).abs() < 1e-6);
+        assert!((after_one.arousal + 0.5).abs() < 1e-6);
+        assert!((after_one.dominance - 0.87).abs() < 1e-6);
+        simulation.drain_events().for_each(drop);
+
+        simulation.advance_to(100).unwrap();
+        assert_eq!(simulation.member_pad(observer), Some(Pad::default()));
+        let events = simulation.drain_events().collect::<Vec<_>>();
+        assert!(
+            matches!(events[0], SimulationEvent::PadChanged { member_id, .. } if member_id == observer)
+        );
+        assert!(matches!(
+            events[1],
+            SimulationEvent::TimeAdvanced {
+                previous_tick: 1,
+                current_tick: 100
+            }
+        ));
+    }
+
+    #[test]
+    fn short_and_long_memory_ttl_boundaries_expire_inclusively_and_keep_deduplication() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        let short = applied(
+            simulation
+                .submit_direct_witness(deed(300, observer, actor, None, 0.4, 0.0, false))
+                .unwrap(),
+        )
+        .memory()
+        .unwrap();
+        assert_eq!(short.created_tick(), 0);
+        assert_eq!(short.expires_at(), 60);
+        simulation.drain_events().for_each(drop);
+
+        simulation.advance_to(59).unwrap();
+        assert!(simulation.memory(observer, 300).unwrap().is_some());
+        simulation.drain_events().for_each(drop);
+        simulation.advance_to(60).unwrap();
+        assert_eq!(simulation.memory(observer, 300).unwrap(), None);
+        let events = simulation.drain_events().collect::<Vec<_>>();
+        assert!(matches!(
+            events[0],
+            SimulationEvent::MemoryExpired {
+                deed_id: 300,
+                kind: MemoryKind::ShortTerm,
+                ..
+            }
+        ));
+        assert!(matches!(
+            events[1],
+            SimulationEvent::TimeAdvanced {
+                previous_tick: 59,
+                current_tick: 60
+            }
+        ));
+
+        assert_eq!(
+            simulation
+                .submit_direct_witness(deed(300, observer, actor, None, 1.0, 1.0, true))
+                .unwrap(),
+            DirectWitnessSubmission::Duplicate {
+                observer,
+                deed_id: 300,
+            }
+        );
+        assert!(simulation.drain_events().next().is_none());
+
+        let long = applied(
+            simulation
+                .submit_direct_witness(deed(301, observer, actor, None, 0.75, 0.0, false))
+                .unwrap(),
+        )
+        .memory()
+        .unwrap();
+        assert_eq!(long.created_tick(), 60);
+        assert_eq!(long.expires_at(), 3660);
+    }
+
+    #[test]
+    fn time_events_are_ordered_pad_then_expiration_then_clock() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        simulation.members.get_mut(&observer).unwrap().pad = Pad::new(0.5, 0.0, 0.0).unwrap();
+        simulation
+            .submit_direct_witness(deed(302, observer, actor, None, 0.4, 0.0, false))
+            .unwrap();
+        simulation.drain_events().for_each(drop);
+        simulation.advance_to(60).unwrap();
+        let events = simulation.drain_events().collect::<Vec<_>>();
+        assert!(
+            matches!(events[0], SimulationEvent::PadChanged { member_id, .. } if member_id == observer)
+        );
+        assert!(
+            matches!(events[1], SimulationEvent::MemoryExpired { observer: id, deed_id: 302, .. } if id == observer)
+        );
+        assert!(matches!(
+            events[2],
+            SimulationEvent::TimeAdvanced {
+                previous_tick: 0,
+                current_tick: 60
+            }
+        ));
+    }
+
+    #[test]
+    fn memory_expiration_overflow_rejects_deed_without_mutation() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        simulation.advance_to(u64::MAX - 10).unwrap();
+        simulation.drain_events().for_each(drop);
+        assert_eq!(
+            simulation.submit_direct_witness(deed(303, observer, actor, None, 0.4, 0.0, false)),
+            Err(Error::TimeOverflow)
+        );
+        assert_eq!(simulation.current_tick(), u64::MAX - 10);
+        assert_eq!(simulation.memory(observer, 303).unwrap(), None);
+        assert_eq!(
+            simulation.member_affinity(observer, actor).unwrap(),
+            affinity(0.0)
+        );
+        assert!(simulation.drain_events().next().is_none());
+    }
+
+    #[test]
+    fn invalid_pad_rolls_back_time_recovery_and_expiration() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        simulation
+            .submit_direct_witness(deed(304, observer, actor, None, 0.4, 0.0, false))
+            .unwrap();
+        simulation.drain_events().for_each(drop);
+        simulation.members.get_mut(&observer).unwrap().pad.pleasure = f32::NAN;
+        let before_memory = simulation.memory(observer, 304).unwrap();
+        assert_eq!(
+            simulation.advance_to(60),
+            Err(Error::Value(ValueError::NonFinite))
+        );
+        assert_eq!(simulation.current_tick(), 0);
+        assert_eq!(simulation.memory(observer, 304).unwrap(), before_memory);
+        assert!(simulation.drain_events().next().is_none());
     }
 }
