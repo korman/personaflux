@@ -3,6 +3,7 @@
 mod bounds;
 mod deed;
 mod evaluation;
+mod memory;
 mod pad;
 mod relationship;
 mod simulation;
@@ -14,6 +15,7 @@ pub use evaluation::{
     DirectWitnessInput, EvaluationPolicyV1, EvaluationResult, MemoryClassification, MemoryDecision,
     evaluate_direct_witness,
 };
+pub use memory::{MemoryKind, MemoryRecord};
 pub use pad::Pad;
 pub use relationship::{RelationshipLayer, RelationshipLookup, RelationshipSubject};
 pub use simulation::{Error, FactionId, MemberId, Simulation, SimulationConfig, SimulationEvent};

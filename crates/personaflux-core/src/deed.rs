@@ -1,4 +1,5 @@
 use crate::evaluation::EvaluationResult;
+use crate::memory::MemoryRecord;
 use crate::pad::Pad;
 use crate::relationship::RelationshipLookup;
 use crate::simulation::Error;
@@ -52,6 +53,7 @@ pub struct DirectWitnessOutcome {
     current_affinity: Affinity,
     previous_pad: Pad,
     current_pad: Pad,
+    memory: Option<MemoryRecord>,
 }
 
 /// Result of one submission, distinguishing an applied deed from an idempotent duplicate.
@@ -127,7 +129,13 @@ impl DirectWitnessOutcome {
             current_affinity,
             previous_pad,
             current_pad,
+            memory: None,
         }
+    }
+
+    pub(crate) const fn with_memory(mut self, memory: Option<MemoryRecord>) -> Self {
+        self.memory = memory;
+        self
     }
 
     pub const fn deed_id(self) -> u64 {
@@ -172,5 +180,9 @@ impl DirectWitnessOutcome {
 
     pub const fn current_pad(self) -> Pad {
         self.current_pad
+    }
+
+    pub const fn memory(self) -> Option<MemoryRecord> {
+        self.memory
     }
 }

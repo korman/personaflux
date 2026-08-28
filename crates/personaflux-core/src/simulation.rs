@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::bounds::{apply_affinity_delta, apply_bounded_delta};
 use crate::deed::{BatchError, DirectWitnessDeed, DirectWitnessOutcome, DirectWitnessSubmission};
 use crate::evaluation::{DirectWitnessInput, EvaluationResult, evaluate_direct_witness};
+use crate::memory::{MemoryChange, MemoryKind, MemoryRecord, MemoryStore};
 use crate::pad::Pad;
 use crate::relationship::{
     RelationshipLayer, RelationshipLookup, RelationshipStore, RelationshipSubject,
@@ -16,6 +17,13 @@ pub struct FactionId(u64);
 /// Stable identifier for a member inside one simulation.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct MemberId(u64);
+
+impl MemberId {
+    #[cfg(test)]
+    pub(crate) const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+}
 
 /// Configuration shared by one simulation instance.
 #[derive(Clone, Copy, Debug, Default)]
@@ -70,6 +78,19 @@ pub enum SimulationEvent {
         previous: Pad,
         current: Pad,
     },
+    MemoryRemembered {
+        observer: MemberId,
+        deed_id: u64,
+        kind: MemoryKind,
+        salience: f32,
+    },
+    MemoryUpgraded {
+        observer: MemberId,
+        deed_id: u64,
+        previous: MemoryKind,
+        current: MemoryKind,
+        salience: f32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +114,7 @@ pub struct Simulation {
     relationships: RelationshipStore,
     dynamic_affinities: BTreeMap<(MemberId, MemberId), Affinity>,
     processed_deeds: BTreeSet<(MemberId, u64)>,
+    memories: MemoryStore,
     events: VecDeque<SimulationEvent>,
 }
 
@@ -107,6 +129,7 @@ impl Simulation {
             relationships: RelationshipStore::default(),
             dynamic_affinities: BTreeMap::new(),
             processed_deeds: BTreeSet::new(),
+            memories: MemoryStore::default(),
             events: VecDeque::new(),
         }
     }
@@ -176,6 +199,18 @@ impl Simulation {
             .unwrap_or_else(|| Affinity::new(0.0).expect("neutral affinity is valid")))
     }
 
+    /// Returns one remembered deed for an observer, if it exists.
+    pub fn memory(&self, observer: MemberId, deed_id: u64) -> Result<Option<MemoryRecord>, Error> {
+        self.require_member(observer)?;
+        Ok(self.memories.get(observer, deed_id))
+    }
+
+    /// Returns all remembered deeds for an observer in deed-id order.
+    pub fn memories_for(&self, observer: MemberId) -> Result<Vec<MemoryRecord>, Error> {
+        self.require_member(observer)?;
+        Ok(self.memories.for_observer(observer))
+    }
+
     /// Applies one direct-witness deed atomically to the observing member.
     pub fn submit_direct_witness(
         &mut self,
@@ -200,6 +235,7 @@ impl Simulation {
         let mut members = self.members.clone();
         let mut dynamic_affinities = self.dynamic_affinities.clone();
         let mut processed_deeds = self.processed_deeds.clone();
+        let mut memories = self.memories.clone();
         let mut pending_events = Vec::new();
         let mut results = Vec::with_capacity(deeds.len());
 
@@ -210,6 +246,7 @@ impl Simulation {
                     &mut members,
                     &mut dynamic_affinities,
                     &mut processed_deeds,
+                    &mut memories,
                     &mut pending_events,
                 )
                 .map_err(|error| BatchError::new(index, error))?;
@@ -219,6 +256,7 @@ impl Simulation {
         self.members = members;
         self.dynamic_affinities = dynamic_affinities;
         self.processed_deeds = processed_deeds;
+        self.memories = memories;
         self.events.extend(pending_events);
         Ok(results)
     }
@@ -241,6 +279,7 @@ impl Simulation {
         members: &mut BTreeMap<MemberId, Member>,
         dynamic_affinities: &mut BTreeMap<(MemberId, MemberId), Affinity>,
         processed_deeds: &mut BTreeSet<(MemberId, u64)>,
+        memories: &mut MemoryStore,
         pending_events: &mut Vec<SimulationEvent>,
     ) -> Result<DirectWitnessSubmission, Error> {
         let key = (deed.observer, deed.deed_id);
@@ -283,6 +322,31 @@ impl Simulation {
             apply_bounded_delta(previous_pad.dominance, raw_pad.dominance)?,
         )?;
 
+        let memory_change = MemoryRecord::from_evaluation(deed, evaluation)
+            .map(|record| memories.insert_or_upgrade(record))
+            .unwrap_or(MemoryChange::None);
+        let (memory, memory_event) = match memory_change {
+            MemoryChange::None => (None, None),
+            MemoryChange::Remembered(record) => (
+                Some(record),
+                Some(SimulationEvent::MemoryRemembered {
+                    observer: record.observer(),
+                    deed_id: record.deed_id(),
+                    kind: record.kind(),
+                    salience: record.salience(),
+                }),
+            ),
+            MemoryChange::Upgraded { previous, current } => (
+                Some(current),
+                Some(SimulationEvent::MemoryUpgraded {
+                    observer: current.observer(),
+                    deed_id: current.deed_id(),
+                    previous,
+                    current: current.kind(),
+                    salience: current.salience(),
+                }),
+            ),
+        };
         let outcome = DirectWitnessOutcome::new(
             deed,
             relationship,
@@ -291,7 +355,8 @@ impl Simulation {
             current_affinity,
             previous_pad,
             current_pad,
-        );
+        )
+        .with_memory(memory);
         processed_deeds.insert(key);
         if current_affinity != previous_affinity {
             dynamic_affinities.insert((deed.observer, deed.actor), current_affinity);
@@ -324,6 +389,9 @@ impl Simulation {
                 previous: previous_pad,
                 current: current_pad,
             });
+        }
+        if let Some(event) = memory_event {
+            pending_events.push(event);
         }
         Ok(DirectWitnessSubmission::Applied(outcome))
     }
@@ -544,7 +612,7 @@ impl Simulation {
 mod tests {
     use super::*;
     use crate::{
-        Affinity, Aggression, DirectWitnessDeed, DirectWitnessSubmission, Impact,
+        Affinity, Aggression, DirectWitnessDeed, DirectWitnessSubmission, Impact, MemoryKind,
         RelationshipLookup,
     };
 
@@ -1034,12 +1102,19 @@ mod tests {
         assert!((outcome.current_pad().arousal - 0.3).abs() < 1e-6);
         assert_eq!(outcome.current_pad().dominance, 0.0);
         let events = simulation.drain_events().collect::<Vec<_>>();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert!(matches!(
             events[0],
             SimulationEvent::DeedEvaluated { target: None, .. }
         ));
         assert!(matches!(events[1], SimulationEvent::PadChanged { .. }));
+        assert!(matches!(
+            events[2],
+            SimulationEvent::MemoryRemembered {
+                kind: MemoryKind::ShortTerm,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1456,5 +1531,137 @@ mod tests {
             .submit_direct_witness(deed(101, observer, actor, None, 0.2, 0.0, false))
             .unwrap();
         assert!(matches!(fresh, DirectWitnessSubmission::Applied(_)));
+    }
+
+    #[test]
+    fn memory_thresholds_and_record_fields_are_applied_to_outcome_and_queries() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        let short = applied(
+            simulation
+                .submit_direct_witness(deed(200, observer, actor, None, 0.4, 0.0, false))
+                .unwrap(),
+        );
+        let memory = short.memory().expect("threshold boundary is remembered");
+        assert_eq!(memory.observer(), observer);
+        assert_eq!(memory.deed_id(), 200);
+        assert_eq!(memory.actor(), actor);
+        assert_eq!(memory.target(), None);
+        assert_eq!(memory.impact(), impact(0.4));
+        assert_eq!(memory.aggression(), aggression(0.0));
+        assert_eq!(memory.kind(), MemoryKind::ShortTerm);
+        assert!((memory.salience() - 0.4).abs() < 1e-6);
+        assert_eq!(simulation.memory(observer, 200).unwrap(), Some(memory));
+
+        let long = applied(
+            simulation
+                .submit_direct_witness(deed(201, observer, actor, None, 0.0, 0.75, false))
+                .unwrap(),
+        );
+        assert_eq!(long.memory().unwrap().kind(), MemoryKind::LongTerm);
+        assert_eq!(simulation.memory(observer, 201).unwrap(), long.memory());
+
+        let not_remembered = applied(
+            simulation
+                .submit_direct_witness(deed(202, observer, actor, None, 0.39, 0.0, false))
+                .unwrap(),
+        );
+        assert_eq!(not_remembered.memory(), None);
+        assert_eq!(simulation.memory(observer, 202).unwrap(), None);
+    }
+
+    #[test]
+    fn aggression_only_can_create_memory_and_memory_events_follow_pad_events() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        let outcome = applied(
+            simulation
+                .submit_direct_witness(deed(203, observer, actor, None, 0.0, 0.6, true))
+                .unwrap(),
+        );
+        assert_eq!(outcome.memory().unwrap().kind(), MemoryKind::ShortTerm);
+        let events = simulation.drain_events().collect::<Vec<_>>();
+        assert!(matches!(events[0], SimulationEvent::DeedEvaluated { .. }));
+        assert!(matches!(events[1], SimulationEvent::PadChanged { .. }));
+        assert!(matches!(
+            events[2],
+            SimulationEvent::MemoryRemembered {
+                kind: MemoryKind::ShortTerm,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn memory_queries_are_deterministic_and_reject_unknown_observers() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        simulation
+            .submit_direct_witness_batch(&[
+                deed(205, observer, actor, None, 0.5, 0.0, false),
+                deed(204, observer, actor, None, 0.5, 0.0, false),
+            ])
+            .unwrap();
+        let memories = simulation.memories_for(observer).unwrap();
+        assert_eq!(
+            memories
+                .iter()
+                .map(|memory| memory.deed_id())
+                .collect::<Vec<_>>(),
+            vec![204, 205]
+        );
+        assert_eq!(simulation.memory(observer, 999).unwrap(), None);
+        let unknown = MemberId(9999);
+        assert_eq!(
+            simulation.memory(unknown, 1),
+            Err(Error::MemberNotFound(unknown))
+        );
+        assert_eq!(
+            simulation.memories_for(unknown),
+            Err(Error::MemberNotFound(unknown))
+        );
+    }
+
+    #[test]
+    fn duplicate_deeds_do_not_change_or_reemit_memory() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        let first = applied(
+            simulation
+                .submit_direct_witness(deed(206, observer, actor, None, 0.5, 0.0, false))
+                .unwrap(),
+        );
+        simulation.drain_events().for_each(drop);
+        let duplicate = simulation
+            .submit_direct_witness(deed(206, observer, actor, None, 1.0, 1.0, true))
+            .unwrap();
+        assert_eq!(
+            duplicate,
+            DirectWitnessSubmission::Duplicate {
+                observer,
+                deed_id: 206,
+            }
+        );
+        assert_eq!(simulation.memory(observer, 206).unwrap(), first.memory());
+        assert!(simulation.drain_events().next().is_none());
+    }
+
+    #[test]
+    fn remembered_state_rolls_back_with_a_failed_batch() {
+        let (mut simulation, _, _, observer, actor) = relationship_simulation();
+        simulation.drain_events().for_each(drop);
+        let unknown = MemberId(707);
+        let error = simulation
+            .submit_direct_witness_batch(&[
+                deed(207, observer, actor, None, 0.5, 0.0, false),
+                deed(208, observer, actor, Some(unknown), 0.5, 0.0, false),
+            ])
+            .unwrap_err();
+        assert_eq!(error.index(), 1);
+        assert_eq!(simulation.memory(observer, 207).unwrap(), None);
+        assert!(simulation.memories_for(observer).unwrap().is_empty());
+        assert!(simulation.drain_events().next().is_none());
+
+        let retry = simulation
+            .submit_direct_witness(deed(207, observer, actor, None, 0.5, 0.0, false))
+            .unwrap();
+        assert!(matches!(retry, DirectWitnessSubmission::Applied(_)));
+        assert!(simulation.memory(observer, 207).unwrap().is_some());
     }
 }

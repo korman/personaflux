@@ -80,13 +80,43 @@ Rust 核心当前通过 `Simulation::submit_direct_witness` 支持单个直接�
 
 命令先验证所有 ID，有目标时解析有效关系，然后完成评价和全部有界状态计算，最后一次性提交状态。观察者对行为者的动态亲和度与三层关系配置独立存储，并从 `0.0` 开始；关系值只作为本次评价的输入。PAD 只更新观察者。任何失败都不改变状态或事件队列。
 
-成功提交先产生 `DeedEvaluated`，对应状态实际变化时再依次产生 `AffinityChanged` 和 `PadChanged`。记忆写入和逻辑时间推迟到后续阶段。
+成功提交先产生 `DeedEvaluated`，对应状态实际变化时再依次产生 `AffinityChanged` 和 `PadChanged`，随后按记忆分类产生 `MemoryRemembered` 或 `MemoryUpgraded`。逻辑时间仍推迟到后续阶段。
 
 ### 批量直接目击与幂等
 
 `Simulation::submit_direct_witness_batch` 按输入数组顺序处理一组 Deed，并返回与输入一一对应的 `Applied` 或 `Duplicate` 结果；单个 `submit_direct_witness` 也使用同一结果枚举。`(observer, deed_id)` 是单提交和批量提交共享的去重键；同一观察者重复提交时返回 `Duplicate`，不重新评价、不改变状态且不产生事件，不同观察者可以使用相同 `deed_id`。
 
 批量命令先完整验证所有成员 ID 和 `actor == target` 约束，再在工作状态中顺序执行。后续输入可以看到前面已应用项的亲和度和 PAD 更新；任一项失败时，整个批次的状态、事件和去重记录全部回滚，并返回失败项的零基索引。空批量是无副作用成功操作。
+
+## v1 Memory State
+
+The Rust core stores remembered direct-witness deeds under the deterministic key
+`(observer, deed_id)`. A record contains the observer, deed, actor, optional target,
+the original impact and aggression, salience, and `ShortTerm` or `LongTerm` kind.
+
+Memory salience is `max(abs(impact), aggression)`. Values below `0.40` are not
+remembered; `0.40` is the inclusive short-term boundary and `0.75` is the inclusive
+long-term boundary. A short-term record may be upgraded to long-term, but records
+are never downgraded and the first deed payload remains authoritative.
+
+`Simulation::memory` and `Simulation::memories_for` are read-only queries. Unknown
+observers are errors and missing deed keys return `None`; queries never create state.
+Memory records are part of the direct-witness transaction. Duplicate deed keys do
+not evaluate, update, or emit memory events. Batch failure rolls back memory state,
+deduplication, other state, and all pending events together.
+
+For an applied deed, memory events follow the existing state events:
+
+```text
+DeedEvaluated
+AffinityChanged (if changed)
+PadChanged (if changed)
+MemoryRemembered or MemoryUpgraded (if changed)
+```
+
+This version does not assign logical creation or expiration ticks. The `60` and
+`3600` logical-second TTLs, expiry cleanup, and permanent deduplication retention
+are implemented with the logical-time state in the next development step.
 
 ## Rumor
 
@@ -128,8 +158,9 @@ explanation factors
 
 ## 记忆
 
-- 支持短期和长期记忆。
-- 容量可配置，使用逻辑时间过期。
+- v1 根据 `max(abs(impact), aggression)` 将直接目击行为分类为短期或长期记忆；低于 `0.40` 不记录，`0.40` 和 `0.75` 分别是包含边界。
+- 同一 `(observer, deed_id)` 只保留一条记录，短期可以升级为长期，不降级；原始行为字段保持首次记录内容。
+- v1 已提供确定性查询和事务回滚，但逻辑时间、TTL、过期清理和容量淘汰留到逻辑时间阶段。
 - 相同 deed ID 去重，同类行为更新重复计数。
 - 分享通常来自长期记忆。
 - MVP 建议先清理过期项，再淘汰最低重要性；相同时按最早时间和稳定 ID。
