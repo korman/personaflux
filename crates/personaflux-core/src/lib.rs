@@ -3,6 +3,7 @@
 mod bounds;
 mod evaluation;
 mod pad;
+mod relationship;
 mod simulation;
 mod values;
 
@@ -12,5 +13,6 @@ pub use evaluation::{
     evaluate_direct_witness,
 };
 pub use pad::Pad;
+pub use relationship::{RelationshipLayer, RelationshipLookup, RelationshipSubject};
 pub use simulation::{Error, FactionId, MemberId, Simulation, SimulationConfig, SimulationEvent};
 pub use values::{Affinity, Aggression, Confidence, Impact, PadValue, ValueError};

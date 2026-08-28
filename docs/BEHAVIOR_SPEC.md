@@ -34,14 +34,26 @@ PersonaFlux 使用 IEEE-754 binary32（Rust `f32`）。
 
 ## 关系
 
-关系有方向：`affinity(A, B) != affinity(B, A)`。
+关系有方向：`affinity(A, B) != affinity(B, A)`。v1 支持三层关系：
 
-待决定：
+- `Member -> Member`：成员之间的个人关系。
+- `Faction -> Member`：阵营对具体成员的制度立场。
+- `Faction -> Faction`：阵营之间的制度基线。
 
-- 阵营、成员和成员到阵营关系的支持范围。
-- 成员关系如何覆盖或叠加阵营关系。
-- 父阵营继承采用平均、加权还是显式策略。
-- 缺失关系使用中立值还是返回错误。
+关系使用 `Affinity`，显式设置的 `0.0` 是一条真实关系记录，不能与缺失混淆。设置会覆盖同方向已有值；清除会删除记录，使查询恢复为缺失或继续使用 fallback。关系允许自指，且 `A -> B` 与 `B -> A` 独立保存。
+
+对成员 `observer` 查询目标成员 `target` 的有效关系时，按以下固定优先级命中第一条记录：
+
+1. `observer -> target` 的 `Member -> Member`。
+2. `observer` 所属阵营 `-> target` 的 `Faction -> Member`。
+3. `observer` 所属阵营 `-> target` 所属阵营的 `Faction -> Faction`。
+4. 没有记录时返回 `Missing`。
+
+有效查询返回实际命中的关系层级，不进行加权、平均或自动叠加。成员和阵营必须预先存在；未知 ID 是错误，查询不会隐式创建关系。
+
+关系值实际发生变化时，核心按宿主调用顺序加入 `RelationshipChanged` 事件，记录关系层、主体、前值和后值。新增记录的前值为空，覆盖记录的前后值均存在，清除记录的后值为空；同值设置和清除缺失关系是幂等 no-op，不产生事件。
+
+v1 不支持 `Member -> Faction`、父阵营继承或多重父阵营。
 
 ## Deed
 
