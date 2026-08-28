@@ -74,6 +74,14 @@ logical timestamp
 
 批量命令必须先完整校验；任一元素非法时整体不提交，并返回从零开始的失败项索引。无法归因到具体元素的错误使用 `UINT64_MAX`。
 
+### 单个直接目击提交（v1 Rust 核心）
+
+Rust 核心当前通过 `Simulation::submit_direct_witness` 支持单个直接目击行为。输入包含 `deed_id`、`observer`、`actor`、可选 `target`、`impact`、`aggression` 和 `threatens_observer`。允许 `observer == actor`，拒绝 `actor == target`。无目标行为使用 `target_affinity = 0`，并忽略观察者威胁标志。
+
+命令先验证所有 ID，有目标时解析有效关系，然后完成评价和全部有界状态计算，最后一次性提交状态。观察者对行为者的动态亲和度与三层关系配置独立存储，并从 `0.0` 开始；关系值只作为本次评价的输入。PAD 只更新观察者。任何失败都不改变状态或事件队列。
+
+成功提交先产生 `DeedEvaluated`，对应状态实际变化时再依次产生 `AffinityChanged` 和 `PadChanged`。批量提交、deed ID 去重、记忆写入和逻辑时间推迟到后续阶段。
+
 ## Rumor
 
 传闻至少包含原始 deed 身份、行为者、目标、置信度、影响、攻击性、traits、重复次数和过期时间。
