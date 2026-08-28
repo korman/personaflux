@@ -52,3 +52,7 @@ packages/android/**/build/
 **/DerivedData/
 **/xcuserdata/
 *.xcuserstate
+# Local code-review-graph database and tool settings
+/.code-review-graph/
+/.kiro/settings/
+**/*.bak
