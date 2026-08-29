@@ -31,7 +31,9 @@ evaluation factors without changing the v1 contract.
 - `bindings/kotlin`: Kotlin/Android wrapper with a small JNI bridge and AAR build script.
 - `docs`: project charter, behavioral specification, architecture, FFI, and roadmap.
 
-See [docs/README.md](docs/README.md) for the full design documentation.
+See [docs/README.md](docs/README.md) for the full design documentation. Release
+and compatibility rules are documented in [docs/VERSIONING.md](docs/VERSIONING.md),
+and user-visible changes are tracked in [CHANGELOG.md](CHANGELOG.md).
 
 ## Build
 
