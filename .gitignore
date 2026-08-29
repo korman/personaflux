@@ -1,5 +1,6 @@
 # Rust build output
 /target/
+/dist/
 **/*.rs.bk
 
 # Native libraries and debug symbols
@@ -46,9 +47,19 @@ Thumbs.db
 **/.externalNativeBuild/
 **/local.properties
 packages/android/**/build/
+bindings/kotlin/**/build/
+bindings/kotlin/**/src/main/jniLibs/
+
+# Managed binding build output
+**/bin/
+**/obj/
 
 # Apple local build state
 **/.build/
 **/DerivedData/
 **/xcuserdata/
 *.xcuserstate
+# Local code-review-graph database and tool settings
+/.code-review-graph/
+/.kiro/settings/
+**/*.bak

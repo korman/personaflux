@@ -34,14 +34,26 @@ PersonaFlux 使用 IEEE-754 binary32（Rust `f32`）。
 
 ## 关系
 
-关系有方向：`affinity(A, B) != affinity(B, A)`。
+关系有方向：`affinity(A, B) != affinity(B, A)`。v1 支持三层关系：
 
-待决定：
+- `Member -> Member`：成员之间的个人关系。
+- `Faction -> Member`：阵营对具体成员的制度立场。
+- `Faction -> Faction`：阵营之间的制度基线。
 
-- 阵营、成员和成员到阵营关系的支持范围。
-- 成员关系如何覆盖或叠加阵营关系。
-- 父阵营继承采用平均、加权还是显式策略。
-- 缺失关系使用中立值还是返回错误。
+关系使用 `Affinity`，显式设置的 `0.0` 是一条真实关系记录，不能与缺失混淆。设置会覆盖同方向已有值；清除会删除记录，使查询恢复为缺失或继续使用 fallback。关系允许自指，且 `A -> B` 与 `B -> A` 独立保存。
+
+对成员 `observer` 查询目标成员 `target` 的有效关系时，按以下固定优先级命中第一条记录：
+
+1. `observer -> target` 的 `Member -> Member`。
+2. `observer` 所属阵营 `-> target` 的 `Faction -> Member`。
+3. `observer` 所属阵营 `-> target` 所属阵营的 `Faction -> Faction`。
+4. 没有记录时返回 `Missing`。
+
+有效查询返回实际命中的关系层级，不进行加权、平均或自动叠加。成员和阵营必须预先存在；未知 ID 是错误，查询不会隐式创建关系。
+
+关系值实际发生变化时，核心按宿主调用顺序加入 `RelationshipChanged` 事件，记录关系层、主体、前值和后值。新增记录的前值为空，覆盖记录的前后值均存在，清除记录的后值为空；同值设置和清除缺失关系是幂等 no-op，不产生事件。
+
+v1 不支持 `Member -> Faction`、父阵营继承或多重父阵营。
 
 ## Deed
 
@@ -61,6 +73,79 @@ logical timestamp
 宿主提交目击者。核心验证 ID、有限浮点和 trait 维度，并按稳定顺序处理。
 
 批量命令必须先完整校验；任一元素非法时整体不提交，并返回从零开始的失败项索引。无法归因到具体元素的错误使用 `UINT64_MAX`。
+
+### 单个直接目击提交（v1 Rust 核心）
+
+Rust 核心当前通过 `Simulation::submit_direct_witness` 支持单个直接目击行为。输入包含 `deed_id`、`observer`、`actor`、可选 `target`、`impact`、`aggression` 和 `threatens_observer`。允许 `observer == actor`，拒绝 `actor == target`。无目标行为使用 `target_affinity = 0`，并忽略观察者威胁标志。
+
+命令先验证所有 ID，有目标时解析有效关系，然后完成评价和全部有界状态计算，最后一次性提交状态。观察者对行为者的动态亲和度与三层关系配置独立存储，并从 `0.0` 开始；关系值只作为本次评价的输入。PAD 只更新观察者。任何失败都不改变状态或事件队列。
+
+成功提交先产生 `DeedEvaluated`，对应状态实际变化时再依次产生 `AffinityChanged` 和 `PadChanged`，随后按记忆分类产生 `MemoryRemembered` 或 `MemoryUpgraded`。逻辑时间仍推迟到后续阶段。
+
+### 批量直接目击与幂等
+
+`Simulation::submit_direct_witness_batch` 按输入数组顺序处理一组 Deed，并返回与输入一一对应的 `Applied` 或 `Duplicate` 结果；单个 `submit_direct_witness` 也使用同一结果枚举。`(observer, deed_id)` 是单提交和批量提交共享的去重键；同一观察者重复提交时返回 `Duplicate`，不重新评价、不改变状态且不产生事件，不同观察者可以使用相同 `deed_id`。
+
+批量命令先完整验证所有成员 ID 和 `actor == target` 约束，再在工作状态中顺序执行。后续输入可以看到前面已应用项的亲和度和 PAD 更新；任一项失败时，整个批次的状态、事件和去重记录全部回滚，并返回失败项的零基索引。空批量是无副作用成功操作。
+
+## v1 Memory State
+
+The Rust core stores remembered direct-witness deeds under the deterministic key
+`(observer, deed_id)`. A record contains the observer, deed, actor, optional target,
+the original impact and aggression, salience, and `ShortTerm` or `LongTerm` kind.
+
+Memory salience is `max(abs(impact), aggression)`. Values below `0.40` are not
+remembered; `0.40` is the inclusive short-term boundary and `0.75` is the inclusive
+long-term boundary. A short-term record may be upgraded to long-term, but records
+are never downgraded and the first deed payload remains authoritative.
+
+`Simulation::memory` and `Simulation::memories_for` are read-only queries. Unknown
+observers are errors and missing deed keys return `None`; queries never create state.
+Memory records are part of the direct-witness transaction. Duplicate deed keys do
+not evaluate, update, or emit memory events. Batch failure rolls back memory state,
+deduplication, other state, and all pending events together.
+
+For an applied deed, memory events follow the existing state events:
+
+```text
+DeedEvaluated
+AffinityChanged (if changed)
+PadChanged (if changed)
+MemoryRemembered or MemoryUpgraded (if changed)
+```
+
+Memory records assign `created_tick` at the current simulation tick and set
+`expires_at` to `created_tick + 60` for short-term or `created_tick + 3600` for
+long-term records. Expiration uses `now >= expires_at`; expired records are removed
+from active memory while the permanent `(observer, deed_id)` deduplication key is
+retained. A short-term upgrade keeps the original creation tick and starts a new
+3600-tick long-term lifetime at the upgrade tick.
+
+## Logical Time and Recovery
+
+The Rust core uses a monotonic `u64` logical tick, initialized to `0`. v1 fixes one
+tick to one logical second. `Simulation::step(delta_ticks)` performs checked
+addition and delegates to `advance_to(target_tick)`. Zero advancement is a strict
+no-op; backwards targets and arithmetic overflow fail without changing state or
+events.
+
+Advancing time uses the total tick delta once. PAD axes recover linearly toward zero
+at `0.05` pleasure, `0.20` arousal, and `0.03` dominance per tick. Recovery never
+crosses zero or exceeds the current absolute value. All members are processed in
+`MemberId` order, followed by active memory expiration in `(observer, deed_id)`
+order.
+
+For a non-empty successful advancement, events are appended in this order:
+
+```text
+PadChanged (if changed)
+MemoryExpired (if any)
+TimeAdvanced
+```
+
+The time operation uses a working copy of PAD and memory state. Invalid PAD values,
+expiration overflow, backwards movement, and checked arithmetic failures leave the
+clock, state, deduplication ledger, and existing event queue unchanged.
 
 ## Rumor
 
@@ -102,8 +187,9 @@ explanation factors
 
 ## 记忆
 
-- 支持短期和长期记忆。
-- 容量可配置，使用逻辑时间过期。
+- v1 根据 `max(abs(impact), aggression)` 将直接目击行为分类为短期或长期记忆；低于 `0.40` 不记录，`0.40` 和 `0.75` 分别是包含边界。
+- 同一 `(observer, deed_id)` 只保留一条记录，短期可以升级为长期，不降级；原始行为字段保持首次记录内容。
+- v1 已提供确定性查询和事务回滚；逻辑时间使用单调 `u64` tick，TTL 和过期清理遵循本节的逻辑时间约定，容量淘汰仍留到后续阶段。
 - 相同 deed ID 去重，同类行为更新重复计数。
 - 分享通常来自长期记忆。
 - MVP 建议先清理过期项，再淘汰最低重要性；相同时按最早时间和稳定 ID。
