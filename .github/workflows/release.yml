@@ -1,0 +1,161 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build -p personaflux-ffi --release
+      - name: Package Linux libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p package/include package/lib
+          cp crates/personaflux-ffi/include/personaflux.h package/include/
+          cp target/release/libpersonaflux.a target/release/libpersonaflux.so package/lib/
+          cp LICENSE-MIT package/LICENSE-MIT
+          tar -czf "personaflux-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" -C package .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: personaflux-*.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build -p personaflux-ffi --release
+      - name: Package Windows libraries
+        shell: pwsh
+        run: |
+          $package = Join-Path $env:RUNNER_TEMP "personaflux-windows"
+          New-Item -ItemType Directory -Force -Path "$package\include", "$package\lib" | Out-Null
+          Copy-Item crates/personaflux-ffi/include/personaflux.h "$package\include\"
+          Copy-Item target/release/personaflux.dll "$package\"
+          Copy-Item target/release/personaflux.lib "$package\lib\personaflux-static.lib"
+          Copy-Item target/release/personaflux.dll.lib "$package\lib\personaflux-import.lib"
+          Copy-Item LICENSE-MIT "$package\LICENSE-MIT"
+          Compress-Archive -Path "$package\*" -DestinationPath "personaflux-$env:GITHUB_REF_NAME-windows-x86_64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: personaflux-*.zip
+
+  macos:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13
+            arch: x86_64
+          - runner: macos-14
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build -p personaflux-ffi --release
+      - name: Package macOS libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p package/include package/lib
+          cp crates/personaflux-ffi/include/personaflux.h package/include/
+          cp target/release/libpersonaflux.a target/release/libpersonaflux.dylib package/lib/
+          cp LICENSE-MIT package/LICENSE-MIT
+          tar -czf "personaflux-${GITHUB_REF_NAME}-macos-${{ matrix.arch }}.tar.gz" -C package .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: personaflux-*.tar.gz
+
+  ios:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - run: bash bindings/swift/scripts/build_xcframework.sh
+      - name: Package XCFramework
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp LICENSE-MIT dist/PersonaFlux.xcframework/
+          ditto -c -k --sequesterRsrc --keepParent dist/PersonaFlux.xcframework "personaflux-${GITHUB_REF_NAME}-ios.xcframework.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios
+          path: personaflux-*.xcframework.zip
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1" "ndk;26.3.11579264"
+      - uses: gradle/gradle-build-action@v3
+        with:
+          gradle-version: "8.7"
+      - run: cargo install cargo-ndk --locked
+      - run: bash bindings/kotlin/scripts/build_android.sh
+      - name: Package AAR
+        shell: bash
+        run: |
+          set -euo pipefail
+          aar=$(find bindings/kotlin/personaflux/build/outputs/aar -name '*.aar' -type f | head -n 1)
+          test -n "$aar"
+          cp "$aar" "personaflux-${GITHUB_REF_NAME}-android.aar"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: personaflux-*.aar
+
+  headers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package C header
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p package/include
+          cp crates/personaflux-ffi/include/personaflux.h package/include/
+          cp LICENSE-MIT package/LICENSE-MIT
+          tar -czf "personaflux-${GITHUB_REF_NAME}-headers.tar.gz" -C package .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: headers
+          path: personaflux-*.tar.gz
+
+  publish:
+    needs: [linux, windows, macos, ios, android, headers]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Generate checksums
+        shell: bash
+        run: sha256sum release-assets/* > release-assets/SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          prerelease: true
+          generate_release_notes: true
+          files: release-assets/*

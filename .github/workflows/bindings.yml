@@ -37,7 +37,7 @@ jobs:
       - shell: pwsh
         run: |
           $env:PERSONAFLUX_NATIVE_PATH = "$env:GITHUB_WORKSPACE\target\debug\personaflux.dll"
-          dotnet run --project bindings/csharp/tests/PersonaFlux.IntegrationTests.csproj --no-build
+          dotnet run --project bindings/csharp/tests/PersonaFlux.IntegrationTests.csproj
 
   swift:
     runs-on: macos-14
@@ -47,7 +47,7 @@ jobs:
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
       - run: cargo build -p personaflux-ffi --release
-      - run: swift test -Xlinker -L"$GITHUB_WORKSPACE/target/release" -Xlinker -lpersonaflux
+      - run: swift test --package-path bindings/swift -Xlinker -L"$GITHUB_WORKSPACE/target/release" -Xlinker -lpersonaflux
       - run: bash bindings/swift/scripts/build_xcframework.sh
 
   android:
