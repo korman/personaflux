@@ -18,7 +18,7 @@ android {
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
-            arguments += "-DPERSONAFLUX_NATIVE_DIR=${System.getenv("PERSONAFLUX_NATIVE_DIR") ?: "${rootDir}/../../target/personaflux-android"}"
+            arguments("-DPERSONAFLUX_NATIVE_DIR=${System.getenv("PERSONAFLUX_NATIVE_DIR") ?: "${rootDir}/../../target/personaflux-android"}")
         }
     }
 }
