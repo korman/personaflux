@@ -27,7 +27,7 @@ public class Simulation(randomSeed: ULong) : AutoCloseable {
 
     public val randomSeed: ULong get() { val output = LongArray(1); check(Native.nativeRandomSeed(requireHandle(), output)); return output[0].toULong() }
     public val currentTick: ULong get() { val output = LongArray(1); check(Native.nativeCurrentTick(requireHandle(), output)); return output[0].toULong() }
-    public fun close() { if (handle != 0L) { Native.nativeDestroy(handle); handle = 0L } }
+    override fun close() { if (handle != 0L) { Native.nativeDestroy(handle); handle = 0L } }
 
     public fun addFaction(name: String): ULong { val output = LongArray(1); check(Native.nativeAddFaction(requireHandle(), name.toByteArray(Charsets.UTF_8), output)); return output[0].toULong() }
     public fun factionName(faction: ULong): String { val code = IntArray(1); val bytes = Native.nativeFactionName(requireHandle(), faction.toLong(), code); check(code[0]); return bytes?.toString(Charsets.UTF_8) ?: "" }
