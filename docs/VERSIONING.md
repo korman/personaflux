@@ -7,7 +7,7 @@ contracts. The numbers must not be combined into one project-wide value.
 
 | Dimension | Current value | Source of truth | Change it when |
 | --- | ---: | --- | --- |
-| Release version | `0.1.0` | Workspace `Cargo.toml` | The packaged Rust crates, native libraries, headers, or bindings are released |
+| Release version | `0.1.1` | Workspace `Cargo.toml` | The packaged Rust crates, native libraries, headers, or bindings are released |
 | C ABI version | `0` | `PF_ABI_VERSION` in Rust and `personaflux.h` | A public C layout, symbol contract, wire type, or compatibility rule breaks |
 | Model version | `1` | `PF_MODEL_VERSION` | Simulation behavior or replay meaning changes |
 | Snapshot schema version | Not implemented yet | Reserved for the snapshot format | The serialized snapshot representation changes |

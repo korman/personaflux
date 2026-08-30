@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "personaflux-core"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "personaflux-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "personaflux-core",
 ]
