@@ -13,12 +13,16 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DPERSONAFLUX_NATIVE_DIR=${System.getenv("PERSONAFLUX_NATIVE_DIR") ?: "${rootDir}/../../target/personaflux-android"}")
+            }
+        }
     }
 
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
-            arguments("-DPERSONAFLUX_NATIVE_DIR=${System.getenv("PERSONAFLUX_NATIVE_DIR") ?: "${rootDir}/../../target/personaflux-android"}")
         }
     }
 }
