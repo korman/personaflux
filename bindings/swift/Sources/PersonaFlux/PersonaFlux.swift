@@ -207,8 +207,14 @@ public final class Simulation {
     public func submitBatch(_ deeds: [DirectWitnessDeed]) throws -> [SubmissionResult] {
         try withHandle { value in
             var raw = deeds.map(makeDeed); let size = MemoryLayout<pf_submission_result_t>.stride
+            let inputCount = UInt32(raw.count)
+            let outputCapacity = UInt32(raw.count)
             var output = [pf_submission_result_t](repeating: pf_submission_result_t(), count: raw.count); var count: UInt32 = 0; var index: UInt32 = UInt32.max
-            let code = raw.withUnsafeMutableBytes { inputs in output.withUnsafeMutableBytes { outputs in pf_simulation_submit_direct_witness_batch(value, inputs.bindMemory(to: pf_direct_witness_deed_t.self).baseAddress, UInt32(raw.count), outputs.bindMemory(to: pf_submission_result_t.self).baseAddress, UInt32(output.count), UInt32(size), &count, &index) } }
+            let code = raw.withUnsafeMutableBytes { inputs in
+                output.withUnsafeMutableBytes { outputs in
+                    pf_simulation_submit_direct_witness_batch(value, inputs.bindMemory(to: pf_direct_witness_deed_t.self).baseAddress, inputCount, outputs.bindMemory(to: pf_submission_result_t.self).baseAddress, outputCapacity, UInt32(size), &count, &index)
+                }
+            }
             try check(code, errorIndex: index == UInt32.max ? nil : index)
             return output.prefix(Int(count)).map(makeSubmission)
         }
