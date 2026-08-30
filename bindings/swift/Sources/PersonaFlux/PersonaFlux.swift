@@ -227,12 +227,12 @@ public final class Simulation {
 }
 
 private func check(_ code: Int32, errorIndex: UInt32? = nil) throws {
-    guard code != PF_OK else { return }
+    guard code != Int32(PF_OK) else { return }
     var length: UInt32 = 0; _ = pf_last_error_message_copy(nil, 0, &length)
     var bytes = [UInt8](repeating: 0, count: Int(length)); if length > 0 { _ = bytes.withUnsafeMutableBytes { pf_last_error_message_copy($0.bindMemory(to: UInt8.self).baseAddress, length, &length) } }
     let message = String(bytes: bytes, encoding: .utf8) ?? "PersonaFlux operation failed"
     let diagnostic = errorIndex.map { "batch index \($0): \(message)" } ?? message
-    switch code {
+    switch Int(code) {
     case PF_INVALID_ARGUMENT: throw PersonaFluxError.invalidArgument(diagnostic)
     case PF_NOT_FOUND: throw PersonaFluxError.notFound(diagnostic)
     case PF_INVALID_STATE: throw PersonaFluxError.invalidState(diagnostic)

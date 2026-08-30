@@ -19,9 +19,12 @@ cargo build --manifest-path "${ROOT}/Cargo.toml" -p personaflux-ffi --release --
 cp "${ROOT}/target/aarch64-apple-ios/release/libpersonaflux.a" "${BUILD}/device/"
 cp "${ROOT}/target/aarch64-apple-ios-sim/release/libpersonaflux.a" "${BUILD}/simulator/libpersonaflux-arm64-sim.a"
 cp "${ROOT}/target/x86_64-apple-ios/release/libpersonaflux.a" "${BUILD}/simulator/libpersonaflux-x86_64-sim.a"
+lipo -create \
+  "${BUILD}/simulator/libpersonaflux-arm64-sim.a" \
+  "${BUILD}/simulator/libpersonaflux-x86_64-sim.a" \
+  -output "${BUILD}/simulator/libpersonaflux.a"
 
 xcodebuild -create-xcframework \
   -library "${BUILD}/device/libpersonaflux.a" -headers "${BUILD}/headers" \
-  -library "${BUILD}/simulator/libpersonaflux-arm64-sim.a" -headers "${BUILD}/headers" \
-  -library "${BUILD}/simulator/libpersonaflux-x86_64-sim.a" -headers "${BUILD}/headers" \
+  -library "${BUILD}/simulator/libpersonaflux.a" -headers "${BUILD}/headers" \
   -output "${OUT}"
