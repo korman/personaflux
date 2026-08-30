@@ -5,9 +5,6 @@ set -euo pipefail
 
 cat > /dev/null || true
 
-repo="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-if [[ -n "$repo" ]]; then
-  code-review-graph update --skip-flows --repo "$repo" >/dev/null 2>&1 || true
-fi
+code-review-graph update --skip-flows --repo "D:/code/personaflux" >/dev/null 2>&1 || true
 echo '{"suppressOutput": true}'
 exit 0

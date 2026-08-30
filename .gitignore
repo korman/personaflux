@@ -63,3 +63,7 @@ bindings/kotlin/**/src/main/jniLibs/
 /.code-review-graph/
 /.kiro/settings/
 **/*.bak
+# Added by code-review-graph
+.code-review-graph/
+/.gemini
+/.gemini
